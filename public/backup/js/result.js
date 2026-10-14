@@ -1,12 +1,13 @@
 import { isQuestionAnswered, isQuestionAnswerCorrect } from "./questionAnswers.js";
 
-const attemptId = new URLSearchParams(window.location.search).get("attempt");
+const attemptId = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("attempt") : null;
 const fallbackKey = `studysphere_result_${attemptId}`;
 const readLocalData = (key, fallback) => {
+  if (typeof localStorage === "undefined") return fallback;
   try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); } catch { return fallback; }
 };
 const fallbackStored = readLocalData(fallbackKey, null);
-const card = document.querySelector("#result-card");
+const card = typeof document !== "undefined" ? document.querySelector("#result-card") : null;
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -16,6 +17,68 @@ function escapeHtml(value) {
 
 function getOptionLabel(index) {
   return String.fromCharCode(65 + index);
+}
+
+export function analyzeResultWeakness(questions = [], answers = []) {
+  const groups = new Map();
+
+  questions.forEach((question, index) => {
+    const difficultyName = (question.difficultyName || question.level || "Chung").trim() || "Chung";
+    const selectedAnswer = answers[index];
+    const answered = isQuestionAnswered(selectedAnswer, question);
+    const isCorrect = isQuestionAnswerCorrect(selectedAnswer, question);
+
+    if (!groups.has(difficultyName)) {
+      groups.set(difficultyName, {
+        label: difficultyName,
+        total: 0,
+        correct: 0,
+        weak: 0,
+        unanswered: 0,
+      });
+    }
+
+    const group = groups.get(difficultyName);
+    group.total += 1;
+
+    if (isCorrect) {
+      group.correct += 1;
+    } else {
+      group.weak += 1;
+      if (!answered) group.unanswered += 1;
+    }
+  });
+
+  const breakdown = [...groups.values()].map((group) => ({
+    ...group,
+    weakCount: group.weak,
+    accuracy: group.total ? Math.round((group.correct / group.total) * 100) : 0,
+  }));
+
+  const weakest = breakdown.reduce((best, item) => {
+    const weaknessRate = item.total ? item.weak / item.total : 0;
+    if (!best) return { ...item, weaknessRate };
+    if (item.weak > best.weak) return { ...item, weaknessRate };
+    if (item.weak === best.weak && weaknessRate > best.weaknessRate) return { ...item, weaknessRate };
+    if (item.weak === best.weak && weaknessRate === best.weaknessRate && item.correct < best.correct) return { ...item, weaknessRate };
+    return best;
+  }, null);
+
+  const summary = weakest
+    ? `Phần học sinh cần tập trung nhất là ${weakest.label}. Bạn sai hoặc bỏ ${weakest.weak} trên ${weakest.total} câu ở mức này nên ôn tập lại phần ${weakest.label.toLowerCase()}.`
+    : "Bạn đang làm tốt ở mọi phần, hãy tiếp tục duy trì phong độ.";
+
+  return {
+    breakdown,
+    weakest: weakest ? {
+      label: weakest.label,
+      weakCount: weakest.weak,
+      total: weakest.total,
+      accuracy: weakest.accuracy,
+      unanswered: weakest.unanswered,
+    } : null,
+    summary,
+  };
 }
 
 function normalizeAttemptData(stored) {
@@ -41,9 +104,10 @@ function normalizeAttemptData(stored) {
   return null;
 }
 
-let stored = normalizeAttemptData(fallbackStored);
+if (typeof window !== "undefined" && typeof document !== "undefined") {
+  let stored = normalizeAttemptData(fallbackStored);
 
-const currentUser = readLocalData("studysphere_current_user", null);
+  const currentUser = readLocalData("studysphere_current_user", null);
 
 if (!stored && attemptId && currentUser?.id) {
   try {
@@ -168,6 +232,37 @@ card.innerHTML = `
     <strong>${passed ? "Bạn đã đạt yêu cầu" : "Cần ôn tập thêm"}</strong>
     <p>${passed ? "Tiếp tục giữ phong độ và luyện thêm những câu chưa chắc chắn." : `Bạn còn ${result.wrongCount + result.unansweredCount} câu cần xem lại trong phần dưới đây.`}</p>
   </div>
+  ${(() => {
+    const analysis = analyzeResultWeakness(questions, result.answers || []);
+    const strongestSection = analysis.breakdown.length ? analysis.breakdown.slice().sort((a, b) => a.accuracy - b.accuracy)[0] : null;
+    const analysisCards = analysis.breakdown.length
+      ? analysis.breakdown.map((item) => `
+        <div class="analysis-item ${item.label === analysis.weakest?.label ? "is-weak" : ""}">
+          <div>
+            <span>${escapeHtml(item.label)}</span>
+            <strong>${item.correct}/${item.total}</strong>
+          </div>
+          <small>${item.weak} câu sai/bỏ</small>
+        </div>
+      `).join("")
+      : "";
+    return `
+      <section class="review-section analysis-section" aria-labelledby="analysis-title">
+        <div class="review-header">
+          <h2 id="analysis-title">Phân tích kết quả</h2>
+        </div>
+        <div class="detail-note">
+          <strong>Phần yếu nhất của bạn</strong>
+          <p>${analysis.summary}</p>
+        </div>
+        <div class="analysis-grid">
+          ${analysisCards}
+        </div>
+        ${analysis.weakest ? `<p class="detail-description">Bạn nên luyện thêm ở mức ${escapeHtml(analysis.weakest.label)}; hiện tại chỉ đạt ${analysis.weakest.accuracy}% và có ${analysis.weakest.weakCount} câu sai hoặc bỏ quên.</p>` : ""}
+        ${strongestSection ? `<p class="detail-description">Phần bạn đang làm tốt nhất là ${escapeHtml(strongestSection.label)} với tỷ lệ đúng ${strongestSection.accuracy}%.</p>` : ""}
+      </section>
+    `;
+  })()}
   <section class="review-section">
     <div class="review-header">
       <h2>Xem lại bài</h2>
@@ -370,4 +465,5 @@ filterButtons.forEach((button) => {
 
 const defaultButton = document.querySelector('.review-filter-button[data-filter="all"]');
 if (defaultButton) defaultButton.classList.add("is-active");
+}
 }
